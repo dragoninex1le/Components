@@ -1,0 +1,81 @@
+name: Deploy Health Check
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: eu-west-2
+  STACK_NAME: porth-components
+  SAM_BUCKET_PREFIX: porth-sam-artifacts
+
+jobs:
+  deploy:
+    name: Deploy via CloudFormation (SAM)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS access
+        run: aws sts get-caller-identity
+
+      - name: Setup SAM CLI
+        uses: aws-actions/setup-sam@v2
+        with:
+          use-installer: true
+
+      - name: SAM build
+        run: sam build --template-file template.yml
+
+      - name: SAM deploy
+        run: |
+          sam deploy \
+            --stack-name "$STACK_NAME" \
+            --resolve-s3 \
+            --capabilities CAPABILITY_IAM \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset \
+            --region "$AWS_REGION"
+
+      - name: Get outputs
+        id: stack
+        run: |
+          HEALTH_URL=$(aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --query "Stacks[0].Outputs[?OutputKey=='HealthCheckUrl'].OutputValue | [0]" \
+            --output text)
+          echo "health_url=$HEALTH_URL" >> "$GITHUB_OUTPUT"
+          echo "Health URL: $HEALTH_URL"
+
+      - name: Smoke test
+        run: |
+          URL="${{ steps.stack.outputs.health_url }}"
+          echo "Testing: $URL"
+
+          for i in 1 2 3 4 5; do
+            HTTP_CODE=$(curl -s -o /tmp/response.json -w "%{http_code}" "$URL")
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo "Health check passed (attempt $i)"
+              cat /tmp/response.json | python3 -m json.tool
+              exit 0
+            fi
+            echo "Attempt $i: HTTP $HTTP_CODE — retrying in 5s..."
+            sleep 5
+          done
+
+          echo "FAILED after 5 attempts"
+          cat /tmp/response.json 2>/dev/null
+          exit 1

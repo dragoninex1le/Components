@@ -1,0 +1,45 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Porth common components — pipeline validation
+
+Globals:
+  Function:
+    Runtime: python3.13
+    Timeout: 10
+    MemorySize: 128
+
+Resources:
+  HealthCheckFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: porth-health-check
+      Handler: handler.handler
+      CodeUri: lambdas/health_check/
+      Events:
+        HealthGet:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PorthApi
+            Path: /health
+            Method: GET
+
+  PorthApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: $default
+      CorsConfiguration:
+        AllowOrigins:
+          - '*'
+        AllowMethods:
+          - GET
+
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !Sub "https://${PorthApi}.execute-api.${AWS::Region}.amazonaws.com"
+  HealthCheckUrl:
+    Description: Full health check URL
+    Value: !Sub "https://${PorthApi}.execute-api.${AWS::Region}.amazonaws.com/health"
+  FunctionArn:
+    Description: Lambda function ARN
+    Value: !GetAtt HealthCheckFunction.Arn
