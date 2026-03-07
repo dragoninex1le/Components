@@ -12,7 +12,6 @@ permissions:
 env:
   AWS_REGION: eu-west-2
   STACK_NAME: porth-components
-  SAM_BUCKET_PREFIX: porth-sam-artifacts
 
 jobs:
   deploy:
@@ -23,11 +22,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Debug — check secret is loaded
+        run: |
+          if [ -z "${{ secrets.AWS_ROLE_ARN }}" ]; then
+            echo "ERROR: AWS_ROLE_ARN secret is EMPTY"
+            exit 1
+          else
+            echo "AWS_ROLE_ARN is set (length: ${#ROLE_ARN} chars)"
+            echo "First 20 chars: ${ROLE_ARN:0:20}..."
+          fi
+        env:
+          ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
+          audience: sts.amazonaws.com
 
       - name: Verify AWS access
         run: aws sts get-caller-identity
