@@ -41,6 +41,7 @@ jobs:
         run: sam build --template-file template.yml
 
       - name: SAM deploy
+        id: deploy
         run: |
           sam deploy \
             --stack-name "$STACK_NAME" \
@@ -48,9 +49,25 @@ jobs:
             --capabilities CAPABILITY_IAM \
             --no-confirm-changeset \
             --no-fail-on-empty-changeset \
-            --region "$AWS_REGION"
+            --region "$AWS_REGION" \
+            2>&1 | tee /tmp/sam-deploy.log
+          exit ${PIPESTATUS[0]}
+
+      - name: Print deploy error on failure
+        if: failure() && steps.deploy.outcome == 'failure'
+        run: |
+          echo "=== SAM Deploy Log ==="
+          cat /tmp/sam-deploy.log 2>/dev/null || echo "No log file found"
+          echo ""
+          echo "=== CloudFormation Events ==="
+          aws cloudformation describe-stack-events \
+            --stack-name "$STACK_NAME" \
+            --region "$AWS_REGION" \
+            --query "StackEvents[?ResourceStatus=='CREATE_FAILED' || ResourceStatus=='UPDATE_FAILED' || ResourceStatus=='ROLLBACK_IN_PROGRESS'].{Resource: LogicalResourceId, Status: ResourceStatus, Reason: ResourceStatusReason}" \
+            --output table 2>/dev/null || echo "Could not fetch CF events"
 
       - name: Get outputs
+        if: success()
         id: stack
         run: |
           HEALTH_URL=$(aws cloudformation describe-stacks \
@@ -61,6 +78,7 @@ jobs:
           echo "Health URL: $HEALTH_URL"
 
       - name: Smoke test
+        if: success()
         run: |
           URL="${{ steps.stack.outputs.health_url }}"
           echo "Testing: $URL"
