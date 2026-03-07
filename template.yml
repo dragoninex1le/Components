@@ -18,7 +18,6 @@ Resources:
   HealthCheckFunction:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: porth-health-check
       Runtime: python3.12
       Handler: handler.handler
       Code: lambdas/health_check/
@@ -29,7 +28,6 @@ Resources:
   PorthApi:
     Type: AWS::ApiGatewayV2::Api
     Properties:
-      Name: porth-api
       ProtocolType: HTTP
       CorsConfiguration:
         AllowOrigins:

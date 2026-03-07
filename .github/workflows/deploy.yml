@@ -38,6 +38,24 @@ jobs:
           aws s3api head-bucket --bucket "$S3_BUCKET" 2>/dev/null || \
           aws s3 mb "s3://$S3_BUCKET" --region "$AWS_REGION"
 
+      - name: Clean up orphaned resources from previous failures
+        run: |
+          echo "Cleaning up any orphaned resources..."
+
+          # Delete orphaned Lambda if it exists
+          aws lambda delete-function --function-name porth-health-check 2>/dev/null && \
+            echo "Deleted orphaned Lambda: porth-health-check" || \
+            echo "No orphaned Lambda found (ok)"
+
+          # Delete orphaned IAM role if it exists
+          # First detach managed policies, then delete
+          for policy in $(aws iam list-attached-role-policies --role-name porth-health-check-role --query 'AttachedPolicies[].PolicyArn' --output text 2>/dev/null); do
+            aws iam detach-role-policy --role-name porth-health-check-role --policy-arn "$policy" 2>/dev/null
+          done
+          aws iam delete-role --role-name porth-health-check-role 2>/dev/null && \
+            echo "Deleted orphaned IAM role: porth-health-check-role" || \
+            echo "No orphaned IAM role found (ok)"
+
       - name: Clean up failed stack if needed
         run: |
           STACK_STATUS=$(aws cloudformation describe-stacks \
@@ -54,17 +72,14 @@ jobs:
           fi
 
           # If stack is in ROLLBACK_FAILED, try to continue the rollback first
-          if [[ "$STACK_STATUS" == "ROLLBACK_FAILED" ]] || \
-             [[ "$STACK_STATUS" == "UPDATE_ROLLBACK_FAILED" ]]; then
+          if [[ "$STACK_STATUS" == *ROLLBACK_FAILED* ]]; then
             echo "Attempting continue-update-rollback..."
             aws cloudformation continue-update-rollback \
               --stack-name "$STACK_NAME" 2>/dev/null || true
-            echo "Waiting for rollback to complete..."
-            aws cloudformation wait stack-rollback-complete \
-              --stack-name "$STACK_NAME" 2>/dev/null || true
+            sleep 10
           fi
 
-          # Now attempt deletion
+          # Delete the stack
           echo "Deleting stack..."
           aws cloudformation delete-stack --stack-name "$STACK_NAME"
           echo "Waiting for deletion..."
@@ -74,22 +89,19 @@ jobs:
             exit 0
           }
 
-          # If delete failed, get the resources that are stuck
-          echo "First delete attempt failed. Trying with --retain-resources..."
-          STUCK_RESOURCES=$(aws cloudformation describe-stack-resources \
+          # If still stuck, force delete with retain
+          echo "Trying force-delete with --retain-resources..."
+          STUCK=$(aws cloudformation describe-stack-resources \
             --stack-name "$STACK_NAME" \
             --query "StackResources[?ResourceStatus=='DELETE_FAILED'].LogicalResourceId" \
             --output text 2>/dev/null || echo "")
-          echo "Stuck resources: $STUCK_RESOURCES"
-
-          if [ -n "$STUCK_RESOURCES" ]; then
+          if [ -n "$STUCK" ]; then
             aws cloudformation delete-stack \
               --stack-name "$STACK_NAME" \
-              --retain-resources $STUCK_RESOURCES
-            echo "Waiting for deletion with retained resources..."
+              --retain-resources $STUCK
             aws cloudformation wait stack-delete-complete \
               --stack-name "$STACK_NAME" || {
-              echo "ERROR: Could not delete stack even with retained resources."
+              echo "ERROR: Could not delete stack."
               exit 1
             }
           fi
@@ -118,14 +130,15 @@ jobs:
       - name: Print deploy error on failure
         if: failure() && steps.deploy.outcome == 'failure'
         run: |
-          echo "=== CloudFormation Deploy Log ==="
+          echo "::group::CloudFormation Deploy Log"
           cat /tmp/cf-deploy.log 2>/dev/null || echo "No log file found"
+          echo "::endgroup::"
           echo ""
-          echo "=== CloudFormation Events ==="
+          echo "::error::CloudFormation stack creation failed. Events:"
           aws cloudformation describe-stack-events \
             --stack-name "$STACK_NAME" \
             --region "$AWS_REGION" \
-            --query "StackEvents[?ResourceStatus=='CREATE_FAILED' || ResourceStatus=='UPDATE_FAILED' || ResourceStatus=='ROLLBACK_IN_PROGRESS'].{Resource: LogicalResourceId, Status: ResourceStatus, Reason: ResourceStatusReason}" \
+            --query "StackEvents[?ResourceStatus=='CREATE_FAILED' || ResourceStatus=='UPDATE_FAILED'].{Resource: LogicalResourceId, Status: ResourceStatus, Reason: ResourceStatusReason}" \
             --output table 2>/dev/null || echo "Could not fetch CF events"
 
       - name: Get outputs
