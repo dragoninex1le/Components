@@ -16,7 +16,7 @@ env:
 
 jobs:
   deploy:
-    name: Deploy via CloudFormation (SAM)
+    name: Deploy via CloudFormation
     runs-on: ubuntu-latest
 
     steps:
@@ -33,38 +33,36 @@ jobs:
       - name: Verify AWS access
         run: aws sts get-caller-identity
 
-      - name: Setup SAM CLI
-        uses: aws-actions/setup-sam@v2
-        with:
-          use-installer: true
-
       - name: Ensure S3 bucket exists
         run: |
           aws s3api head-bucket --bucket "$S3_BUCKET" 2>/dev/null || \
           aws s3 mb "s3://$S3_BUCKET" --region "$AWS_REGION"
 
-      - name: SAM build
-        run: sam build --template-file template.yml
-
-      - name: SAM deploy
-        id: deploy
+      - name: Package CloudFormation template
         run: |
-          sam deploy \
-            --stack-name "$STACK_NAME" \
+          aws cloudformation package \
+            --template-file template.yml \
             --s3-bucket "$S3_BUCKET" \
             --s3-prefix "porth" \
-            --capabilities CAPABILITY_IAM \
-            --no-confirm-changeset \
-            --no-fail-on-empty-changeset \
+            --output-template-file packaged.yml
+
+      - name: Deploy CloudFormation stack
+        id: deploy
+        run: |
+          aws cloudformation deploy \
+            --template-file packaged.yml \
+            --stack-name "$STACK_NAME" \
+            --capabilities CAPABILITY_NAMED_IAM \
             --region "$AWS_REGION" \
-            2>&1 | tee /tmp/sam-deploy.log
+            --no-fail-on-empty-changeset \
+            2>&1 | tee /tmp/cf-deploy.log
           exit ${PIPESTATUS[0]}
 
       - name: Print deploy error on failure
         if: failure() && steps.deploy.outcome == 'failure'
         run: |
-          echo "=== SAM Deploy Log ==="
-          cat /tmp/sam-deploy.log 2>/dev/null || echo "No log file found"
+          echo "=== CloudFormation Deploy Log ==="
+          cat /tmp/cf-deploy.log 2>/dev/null || echo "No log file found"
           echo ""
           echo "=== CloudFormation Events ==="
           aws cloudformation describe-stack-events \
