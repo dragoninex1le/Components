@@ -38,6 +38,24 @@ jobs:
           aws s3api head-bucket --bucket "$S3_BUCKET" 2>/dev/null || \
           aws s3 mb "s3://$S3_BUCKET" --region "$AWS_REGION"
 
+      - name: Clean up failed stack if needed
+        run: |
+          STACK_STATUS=$(aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --query "Stacks[0].StackStatus" \
+            --output text 2>/dev/null || echo "DOES_NOT_EXIST")
+          echo "Current stack status: $STACK_STATUS"
+          if [[ "$STACK_STATUS" == *ROLLBACK_COMPLETE* ]] || \
+             [[ "$STACK_STATUS" == *DELETE_FAILED* ]] || \
+             [[ "$STACK_STATUS" == *CREATE_FAILED* ]] || \
+             [[ "$STACK_STATUS" == *ROLLBACK_FAILED* ]]; then
+            echo "Stack is in failed state ($STACK_STATUS). Deleting before re-deploy..."
+            aws cloudformation delete-stack --stack-name "$STACK_NAME"
+            echo "Waiting for stack deletion..."
+            aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME"
+            echo "Stack deleted successfully."
+          fi
+
       - name: Package CloudFormation template
         run: |
           aws cloudformation package \
@@ -52,7 +70,7 @@ jobs:
           aws cloudformation deploy \
             --template-file packaged.yml \
             --stack-name "$STACK_NAME" \
-            --capabilities CAPABILITY_NAMED_IAM \
+            --capabilities CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
             --region "$AWS_REGION" \
             --no-fail-on-empty-changeset \
             2>&1 | tee /tmp/cf-deploy.log
