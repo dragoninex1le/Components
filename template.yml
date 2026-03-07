@@ -5,7 +5,6 @@ Resources:
   LambdaExecutionRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: porth-health-check-role
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:

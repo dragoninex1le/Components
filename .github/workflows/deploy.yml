@@ -45,16 +45,55 @@ jobs:
             --query "Stacks[0].StackStatus" \
             --output text 2>/dev/null || echo "DOES_NOT_EXIST")
           echo "Current stack status: $STACK_STATUS"
-          if [[ "$STACK_STATUS" == *ROLLBACK_COMPLETE* ]] || \
-             [[ "$STACK_STATUS" == *DELETE_FAILED* ]] || \
-             [[ "$STACK_STATUS" == *CREATE_FAILED* ]] || \
-             [[ "$STACK_STATUS" == *ROLLBACK_FAILED* ]]; then
-            echo "Stack is in failed state ($STACK_STATUS). Deleting before re-deploy..."
-            aws cloudformation delete-stack --stack-name "$STACK_NAME"
-            echo "Waiting for stack deletion..."
-            aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME"
-            echo "Stack deleted successfully."
+
+          if [[ "$STACK_STATUS" == "DOES_NOT_EXIST" ]] || \
+             [[ "$STACK_STATUS" == "CREATE_COMPLETE" ]] || \
+             [[ "$STACK_STATUS" == "UPDATE_COMPLETE" ]]; then
+            echo "Stack is in a good state or does not exist. Proceeding."
+            exit 0
           fi
+
+          # If stack is in ROLLBACK_FAILED, try to continue the rollback first
+          if [[ "$STACK_STATUS" == "ROLLBACK_FAILED" ]] || \
+             [[ "$STACK_STATUS" == "UPDATE_ROLLBACK_FAILED" ]]; then
+            echo "Attempting continue-update-rollback..."
+            aws cloudformation continue-update-rollback \
+              --stack-name "$STACK_NAME" 2>/dev/null || true
+            echo "Waiting for rollback to complete..."
+            aws cloudformation wait stack-rollback-complete \
+              --stack-name "$STACK_NAME" 2>/dev/null || true
+          fi
+
+          # Now attempt deletion
+          echo "Deleting stack..."
+          aws cloudformation delete-stack --stack-name "$STACK_NAME"
+          echo "Waiting for deletion..."
+          aws cloudformation wait stack-delete-complete \
+            --stack-name "$STACK_NAME" 2>/dev/null && {
+            echo "Stack deleted successfully."
+            exit 0
+          }
+
+          # If delete failed, get the resources that are stuck
+          echo "First delete attempt failed. Trying with --retain-resources..."
+          STUCK_RESOURCES=$(aws cloudformation describe-stack-resources \
+            --stack-name "$STACK_NAME" \
+            --query "StackResources[?ResourceStatus=='DELETE_FAILED'].LogicalResourceId" \
+            --output text 2>/dev/null || echo "")
+          echo "Stuck resources: $STUCK_RESOURCES"
+
+          if [ -n "$STUCK_RESOURCES" ]; then
+            aws cloudformation delete-stack \
+              --stack-name "$STACK_NAME" \
+              --retain-resources $STUCK_RESOURCES
+            echo "Waiting for deletion with retained resources..."
+            aws cloudformation wait stack-delete-complete \
+              --stack-name "$STACK_NAME" || {
+              echo "ERROR: Could not delete stack even with retained resources."
+              exit 1
+            }
+          fi
+          echo "Stack cleaned up."
 
       - name: Package CloudFormation template
         run: |
