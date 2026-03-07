@@ -13,6 +13,7 @@ env:
   AWS_REGION: us-east-1
   STACK_NAME: porth-components
   S3_BUCKET: porth-sam-artifacts-084847995635
+  LAMBDA_ROLE_NAME: porth-lambda-execution-role
 
 jobs:
   deploy:
@@ -38,23 +39,39 @@ jobs:
           aws s3api head-bucket --bucket "$S3_BUCKET" 2>/dev/null || \
           aws s3 mb "s3://$S3_BUCKET" --region "$AWS_REGION"
 
-      - name: Clean up orphaned resources from previous failures
+      - name: Ensure Lambda execution role exists
+        id: iam_role
         run: |
-          echo "Cleaning up any orphaned resources..."
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/${LAMBDA_ROLE_NAME}"
 
-          # Delete orphaned Lambda if it exists
-          aws lambda delete-function --function-name porth-health-check 2>/dev/null && \
-            echo "Deleted orphaned Lambda: porth-health-check" || \
-            echo "No orphaned Lambda found (ok)"
+          # Try to get the role first
+          if aws iam get-role --role-name "$LAMBDA_ROLE_NAME" >/dev/null 2>&1; then
+            echo "Lambda execution role already exists: $ROLE_ARN"
+          else
+            echo "Creating Lambda execution role..."
+            aws iam create-role \
+              --role-name "$LAMBDA_ROLE_NAME" \
+              --assume-role-policy-document '{
+                "Version": "2012-10-17",
+                "Statement": [{
+                  "Effect": "Allow",
+                  "Principal": {"Service": "lambda.amazonaws.com"},
+                  "Action": "sts:AssumeRole"
+                }]
+              }' \
+              --description "Execution role for Porth Lambda functions"
 
-          # Delete orphaned IAM role if it exists
-          # First detach managed policies, then delete
-          for policy in $(aws iam list-attached-role-policies --role-name porth-health-check-role --query 'AttachedPolicies[].PolicyArn' --output text 2>/dev/null); do
-            aws iam detach-role-policy --role-name porth-health-check-role --policy-arn "$policy" 2>/dev/null
-          done
-          aws iam delete-role --role-name porth-health-check-role 2>/dev/null && \
-            echo "Deleted orphaned IAM role: porth-health-check-role" || \
-            echo "No orphaned IAM role found (ok)"
+            aws iam attach-role-policy \
+              --role-name "$LAMBDA_ROLE_NAME" \
+              --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+            echo "Created and configured: $ROLE_ARN"
+            echo "Waiting 10s for IAM propagation..."
+            sleep 10
+          fi
+
+          echo "role_arn=$ROLE_ARN" >> "$GITHUB_OUTPUT"
 
       - name: Clean up failed stack if needed
         run: |
@@ -80,7 +97,7 @@ jobs:
           fi
 
           # Delete the stack
-          echo "Deleting stack..."
+          echo "Deleting stack in $STACK_STATUS state..."
           aws cloudformation delete-stack --stack-name "$STACK_NAME"
           echo "Waiting for deletion..."
           aws cloudformation wait stack-delete-complete \
@@ -101,7 +118,7 @@ jobs:
               --retain-resources $STUCK
             aws cloudformation wait stack-delete-complete \
               --stack-name "$STACK_NAME" || {
-              echo "ERROR: Could not delete stack."
+              echo "::error::Could not delete stack even with --retain-resources."
               exit 1
             }
           fi
@@ -122,19 +139,20 @@ jobs:
             --template-file packaged.yml \
             --stack-name "$STACK_NAME" \
             --capabilities CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
+            --parameter-overrides "LambdaRoleArn=${{ steps.iam_role.outputs.role_arn }}" \
             --region "$AWS_REGION" \
             --no-fail-on-empty-changeset \
             2>&1 | tee /tmp/cf-deploy.log
           exit ${PIPESTATUS[0]}
 
-      - name: Print deploy error on failure
+      - name: Capture deploy failure details
         if: failure() && steps.deploy.outcome == 'failure'
         run: |
           echo "::group::CloudFormation Deploy Log"
           cat /tmp/cf-deploy.log 2>/dev/null || echo "No log file found"
           echo "::endgroup::"
           echo ""
-          echo "::error::CloudFormation stack creation failed. Events:"
+          echo "::error::CloudFormation stack creation/update failed. Checking events..."
           aws cloudformation describe-stack-events \
             --stack-name "$STACK_NAME" \
             --region "$AWS_REGION" \
@@ -169,6 +187,6 @@ jobs:
             sleep 5
           done
 
-          echo "FAILED after 5 attempts"
+          echo "::error::Health check FAILED after 5 attempts"
           cat /tmp/response.json 2>/dev/null
           exit 1

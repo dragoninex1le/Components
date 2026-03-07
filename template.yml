@@ -1,27 +1,19 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: Porth common components — pipeline validation
 
-Resources:
-  LambdaExecutionRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: lambda.amazonaws.com
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+Parameters:
+  LambdaRoleArn:
+    Type: String
+    Description: ARN of the IAM role for the Lambda function
 
+Resources:
   HealthCheckFunction:
     Type: AWS::Lambda::Function
     Properties:
       Runtime: python3.12
       Handler: handler.handler
       Code: lambdas/health_check/
-      Role: !GetAtt LambdaExecutionRole.Arn
+      Role: !Ref LambdaRoleArn
       Timeout: 10
       MemorySize: 128
 
