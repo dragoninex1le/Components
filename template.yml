@@ -4,7 +4,7 @@ Description: Porth common components — pipeline validation
 
 Globals:
   Function:
-    Runtime: python3.13
+    Runtime: python3.12
     Timeout: 10
     MemorySize: 128
 
