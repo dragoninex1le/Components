@@ -28,6 +28,7 @@ Resources:
   PorthApi:
     Type: AWS::ApiGatewayV2::Api
     Properties:
+      Name: !Sub "${AWS::StackName}-api"
       ProtocolType: HTTP
       CorsConfiguration:
         AllowOrigins:
