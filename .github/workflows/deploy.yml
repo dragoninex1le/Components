@@ -12,6 +12,7 @@ permissions:
 env:
   AWS_REGION: us-east-1
   STACK_NAME: porth-components
+  S3_BUCKET: porth-sam-artifacts-084847995635
 
 jobs:
   deploy:
@@ -37,6 +38,11 @@ jobs:
         with:
           use-installer: true
 
+      - name: Ensure S3 bucket exists
+        run: |
+          aws s3api head-bucket --bucket "$S3_BUCKET" 2>/dev/null || \
+          aws s3 mb "s3://$S3_BUCKET" --region "$AWS_REGION"
+
       - name: SAM build
         run: sam build --template-file template.yml
 
@@ -45,7 +51,8 @@ jobs:
         run: |
           sam deploy \
             --stack-name "$STACK_NAME" \
-            --resolve-s3 \
+            --s3-bucket "$S3_BUCKET" \
+            --s3-prefix "porth" \
             --capabilities CAPABILITY_IAM \
             --no-confirm-changeset \
             --no-fail-on-empty-changeset \
