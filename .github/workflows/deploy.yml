@@ -48,30 +48,37 @@ jobs:
           ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
           ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/${LAMBDA_ROLE_NAME}"
 
-          if aws iam get-role --role-name "$LAMBDA_ROLE_NAME" >/dev/null 2>&1; then
-            echo "Lambda execution role already exists: $ROLE_ARN"
-          else
-            echo "Creating Lambda execution role..."
-            aws iam create-role \
-              --role-name "$LAMBDA_ROLE_NAME" \
-              --assume-role-policy-document '{
-                "Version": "2012-10-17",
-                "Statement": [{
-                  "Effect": "Allow",
-                  "Principal": {"Service": "lambda.amazonaws.com"},
-                  "Action": "sts:AssumeRole"
-                }]
-              }' \
-              --description "Execution role for Porth Lambda functions"
+          # Try to create the role. If it already exists, that's fine.
+          # We use create-role instead of get-role because our deploy
+          # role lacks iam:GetRole permission.
+          CREATE_OUTPUT=$(aws iam create-role \
+            --role-name "$LAMBDA_ROLE_NAME" \
+            --assume-role-policy-document '{
+              "Version": "2012-10-17",
+              "Statement": [{
+                "Effect": "Allow",
+                "Principal": {"Service": "lambda.amazonaws.com"},
+                "Action": "sts:AssumeRole"
+              }]
+            }' \
+            --description "Execution role for Porth Lambda functions" 2>&1) && {
+            echo "Created Lambda execution role: $ROLE_ARN"
 
             aws iam attach-role-policy \
               --role-name "$LAMBDA_ROLE_NAME" \
               --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
 
-            echo "Created and configured: $ROLE_ARN"
+            echo "Attached AWSLambdaBasicExecutionRole policy"
             echo "Waiting 10s for IAM propagation..."
             sleep 10
-          fi
+          } || {
+            if echo "$CREATE_OUTPUT" | grep -q "EntityAlreadyExists"; then
+              echo "Lambda execution role already exists: $ROLE_ARN"
+            else
+              echo "::error::Failed to create Lambda execution role: $CREATE_OUTPUT"
+              exit 1
+            fi
+          }
 
           echo "role_arn=$ROLE_ARN" >> "$GITHUB_OUTPUT"
 
