@@ -19,6 +19,9 @@ jobs:
   deploy:
     name: Deploy via CloudFormation
     runs-on: ubuntu-latest
+    outputs:
+      api_endpoint: ${{ steps.stack.outputs.api_endpoint }}
+      health_url: ${{ steps.stack.outputs.health_url }}
 
     steps:
       - name: Checkout
@@ -45,7 +48,6 @@ jobs:
           ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
           ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/${LAMBDA_ROLE_NAME}"
 
-          # Try to get the role first
           if aws iam get-role --role-name "$LAMBDA_ROLE_NAME" >/dev/null 2>&1; then
             echo "Lambda execution role already exists: $ROLE_ARN"
           else
@@ -88,7 +90,6 @@ jobs:
             exit 0
           fi
 
-          # If stack is in ROLLBACK_FAILED, try to continue the rollback first
           if [[ "$STACK_STATUS" == *ROLLBACK_FAILED* ]]; then
             echo "Attempting continue-update-rollback..."
             aws cloudformation continue-update-rollback \
@@ -96,7 +97,6 @@ jobs:
             sleep 10
           fi
 
-          # Delete the stack
           echo "Deleting stack in $STACK_STATUS state..."
           aws cloudformation delete-stack --stack-name "$STACK_NAME"
           echo "Waiting for deletion..."
@@ -106,7 +106,6 @@ jobs:
             exit 0
           }
 
-          # If still stuck, force delete with retain
           echo "Trying force-delete with --retain-resources..."
           STUCK=$(aws cloudformation describe-stack-resources \
             --stack-name "$STACK_NAME" \
@@ -163,11 +162,17 @@ jobs:
         if: success()
         id: stack
         run: |
+          API_ENDPOINT=$(aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --query "Stacks[0].Outputs[?OutputKey=='ApiEndpoint'].OutputValue | [0]" \
+            --output text)
           HEALTH_URL=$(aws cloudformation describe-stacks \
             --stack-name "$STACK_NAME" \
             --query "Stacks[0].Outputs[?OutputKey=='HealthCheckUrl'].OutputValue | [0]" \
             --output text)
+          echo "api_endpoint=$API_ENDPOINT" >> "$GITHUB_OUTPUT"
           echo "health_url=$HEALTH_URL" >> "$GITHUB_OUTPUT"
+          echo "API Endpoint: $API_ENDPOINT"
           echo "Health URL: $HEALTH_URL"
 
       - name: Smoke test
@@ -179,7 +184,7 @@ jobs:
           for i in 1 2 3 4 5; do
             HTTP_CODE=$(curl -s -o /tmp/response.json -w "%{http_code}" "$URL")
             if [ "$HTTP_CODE" = "200" ]; then
-              echo "Health check passed (attempt $i)"
+              echo "Smoke test passed (attempt $i)"
               cat /tmp/response.json | python3 -m json.tool
               exit 0
             fi
@@ -187,6 +192,39 @@ jobs:
             sleep 5
           done
 
-          echo "::error::Health check FAILED after 5 attempts"
+          echo "::error::Smoke test FAILED after 5 attempts"
           cat /tmp/response.json 2>/dev/null
           exit 1
+
+  test:
+    name: Integration tests
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: success()
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install test dependencies
+        run: pip install -r tests/requirements-test.txt
+
+      - name: Run integration tests
+        env:
+          API_ENDPOINT: ${{ needs.deploy.outputs.api_endpoint }}
+        run: |
+          echo "Running integration tests against: $API_ENDPOINT"
+          pytest tests/integration/ -v --tb=short --junitxml=test-results.xml
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: test-results.xml
+          retention-days: 30
