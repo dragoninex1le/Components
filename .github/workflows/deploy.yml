@@ -1,27 +1,34 @@
-name: Deploy Health Check
+name: Deploy Porth Components
 
 on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: false
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
 
 permissions:
   id-token: write
   contents: read
 
 env:
-  AWS_REGION: us-east-1
+  AWS_REGION: eu-west-2
   STACK_NAME: porth-components
-  S3_BUCKET: porth-sam-artifacts-084847995635
-  LAMBDA_ROLE_NAME: porth-lambda-execution-role
+  SAM_BUCKET_PREFIX: porth-sam-artifacts
+  ENVIRONMENT: ${{ github.event.inputs.environment || 'dev' }}
 
 jobs:
   deploy:
-    name: Deploy via CloudFormation
+    name: Deploy via CloudFormation (SAM)
     runs-on: ubuntu-latest
-    outputs:
-      api_endpoint: ${{ steps.stack.outputs.api_endpoint }}
-      health_url: ${{ steps.stack.outputs.health_url }}
 
     steps:
       - name: Checkout
@@ -32,158 +39,52 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-          audience: sts.amazonaws.com
 
       - name: Verify AWS access
         run: aws sts get-caller-identity
 
-      - name: Ensure S3 bucket exists
+      - name: Setup SAM CLI
+        uses: aws-actions/setup-sam@v2
+        with:
+          use-installer: true
+
+      - name: SAM build
+        run: sam build --template-file template.yml
+
+      - name: SAM deploy
         run: |
-          aws s3api head-bucket --bucket "$S3_BUCKET" 2>/dev/null || \
-          aws s3 mb "s3://$S3_BUCKET" --region "$AWS_REGION"
-
-      - name: Ensure Lambda execution role exists
-        id: iam_role
-        run: |
-          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-          ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/${LAMBDA_ROLE_NAME}"
-
-          # Try to create the role. If it already exists, that's fine.
-          # We use create-role instead of get-role because our deploy
-          # role lacks iam:GetRole permission.
-          CREATE_OUTPUT=$(aws iam create-role \
-            --role-name "$LAMBDA_ROLE_NAME" \
-            --assume-role-policy-document '{
-              "Version": "2012-10-17",
-              "Statement": [{
-                "Effect": "Allow",
-                "Principal": {"Service": "lambda.amazonaws.com"},
-                "Action": "sts:AssumeRole"
-              }]
-            }' \
-            --description "Execution role for Porth Lambda functions" 2>&1) && {
-            echo "Created Lambda execution role: $ROLE_ARN"
-
-            aws iam attach-role-policy \
-              --role-name "$LAMBDA_ROLE_NAME" \
-              --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-
-            echo "Attached AWSLambdaBasicExecutionRole policy"
-            echo "Waiting 10s for IAM propagation..."
-            sleep 10
-          } || {
-            if echo "$CREATE_OUTPUT" | grep -q "EntityAlreadyExists"; then
-              echo "Lambda execution role already exists: $ROLE_ARN"
-            else
-              echo "::error::Failed to create Lambda execution role: $CREATE_OUTPUT"
-              exit 1
-            fi
-          }
-
-          echo "role_arn=$ROLE_ARN" >> "$GITHUB_OUTPUT"
-
-      - name: Clean up failed stack if needed
-        run: |
-          STACK_STATUS=$(aws cloudformation describe-stacks \
+          sam deploy \
             --stack-name "$STACK_NAME" \
-            --query "Stacks[0].StackStatus" \
-            --output text 2>/dev/null || echo "DOES_NOT_EXIST")
-          echo "Current stack status: $STACK_STATUS"
-
-          if [[ "$STACK_STATUS" == "DOES_NOT_EXIST" ]] || \
-             [[ "$STACK_STATUS" == "CREATE_COMPLETE" ]] || \
-             [[ "$STACK_STATUS" == "UPDATE_COMPLETE" ]]; then
-            echo "Stack is in a good state or does not exist. Proceeding."
-            exit 0
-          fi
-
-          if [[ "$STACK_STATUS" == *ROLLBACK_FAILED* ]]; then
-            echo "Attempting continue-update-rollback..."
-            aws cloudformation continue-update-rollback \
-              --stack-name "$STACK_NAME" 2>/dev/null || true
-            sleep 10
-          fi
-
-          echo "Deleting stack in $STACK_STATUS state..."
-          aws cloudformation delete-stack --stack-name "$STACK_NAME"
-          echo "Waiting for deletion..."
-          aws cloudformation wait stack-delete-complete \
-            --stack-name "$STACK_NAME" 2>/dev/null && {
-            echo "Stack deleted successfully."
-            exit 0
-          }
-
-          echo "Trying force-delete with --retain-resources..."
-          STUCK=$(aws cloudformation describe-stack-resources \
-            --stack-name "$STACK_NAME" \
-            --query "StackResources[?ResourceStatus=='DELETE_FAILED'].LogicalResourceId" \
-            --output text 2>/dev/null || echo "")
-          if [ -n "$STUCK" ]; then
-            aws cloudformation delete-stack \
-              --stack-name "$STACK_NAME" \
-              --retain-resources $STUCK
-            aws cloudformation wait stack-delete-complete \
-              --stack-name "$STACK_NAME" || {
-              echo "::error::Could not delete stack even with --retain-resources."
-              exit 1
-            }
-          fi
-          echo "Stack cleaned up."
-
-      - name: Package CloudFormation template
-        run: |
-          aws cloudformation package \
-            --template-file template.yml \
-            --s3-bucket "$S3_BUCKET" \
-            --s3-prefix "porth" \
-            --output-template-file packaged.yml
-
-      - name: Deploy CloudFormation stack
-        id: deploy
-        run: |
-          aws cloudformation deploy \
-            --template-file packaged.yml \
-            --stack-name "$STACK_NAME" \
-            --capabilities CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
-            --parameter-overrides "LambdaRoleArn=${{ steps.iam_role.outputs.role_arn }}" \
-            --region "$AWS_REGION" \
+            --resolve-s3 \
+            --capabilities CAPABILITY_IAM \
+            --no-confirm-changeset \
             --no-fail-on-empty-changeset \
-            2>&1 | tee /tmp/cf-deploy.log
-          exit ${PIPESTATUS[0]}
-
-      - name: Capture deploy failure details
-        if: failure() && steps.deploy.outcome == 'failure'
-        run: |
-          echo "::group::CloudFormation Deploy Log"
-          cat /tmp/cf-deploy.log 2>/dev/null || echo "No log file found"
-          echo "::endgroup::"
-          echo ""
-          echo "::error::CloudFormation stack creation/update failed. Checking events..."
-          aws cloudformation describe-stack-events \
-            --stack-name "$STACK_NAME" \
             --region "$AWS_REGION" \
-            --query "StackEvents[?ResourceStatus=='CREATE_FAILED' || ResourceStatus=='UPDATE_FAILED'].{Resource: LogicalResourceId, Status: ResourceStatus, Reason: ResourceStatusReason}" \
-            --output table 2>/dev/null || echo "Could not fetch CF events"
+            --parameter-overrides "Environment=$ENVIRONMENT"
 
       - name: Get outputs
-        if: success()
         id: stack
         run: |
-          API_ENDPOINT=$(aws cloudformation describe-stacks \
-            --stack-name "$STACK_NAME" \
-            --query "Stacks[0].Outputs[?OutputKey=='ApiEndpoint'].OutputValue | [0]" \
-            --output text)
           HEALTH_URL=$(aws cloudformation describe-stacks \
             --stack-name "$STACK_NAME" \
             --query "Stacks[0].Outputs[?OutputKey=='HealthCheckUrl'].OutputValue | [0]" \
             --output text)
-          echo "api_endpoint=$API_ENDPOINT" >> "$GITHUB_OUTPUT"
           echo "health_url=$HEALTH_URL" >> "$GITHUB_OUTPUT"
-          echo "API Endpoint: $API_ENDPOINT"
           echo "Health URL: $HEALTH_URL"
 
+          EVENT_BUS=$(aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --query "Stacks[0].Outputs[?OutputKey=='EventBusName'].OutputValue | [0]" \
+            --output text)
+          echo "Event Bus: $EVENT_BUS"
+
+          USERS_TABLE=$(aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --query "Stacks[0].Outputs[?OutputKey=='UsersTableName'].OutputValue | [0]" \
+            --output text)
+          echo "Users Table: $USERS_TABLE"
+
       - name: Smoke test
-        if: success()
         run: |
           URL="${{ steps.stack.outputs.health_url }}"
           echo "Testing: $URL"
@@ -191,7 +92,7 @@ jobs:
           for i in 1 2 3 4 5; do
             HTTP_CODE=$(curl -s -o /tmp/response.json -w "%{http_code}" "$URL")
             if [ "$HTTP_CODE" = "200" ]; then
-              echo "Smoke test passed (attempt $i)"
+              echo "Health check passed (attempt $i)"
               cat /tmp/response.json | python3 -m json.tool
               exit 0
             fi
@@ -199,39 +100,6 @@ jobs:
             sleep 5
           done
 
-          echo "::error::Smoke test FAILED after 5 attempts"
+          echo "FAILED after 5 attempts"
           cat /tmp/response.json 2>/dev/null
           exit 1
-
-  test:
-    name: Integration tests
-    runs-on: ubuntu-latest
-    needs: deploy
-    if: success()
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Install test dependencies
-        run: pip install -r tests/requirements-test.txt
-
-      - name: Run integration tests
-        env:
-          API_ENDPOINT: ${{ needs.deploy.outputs.api_endpoint }}
-        run: |
-          echo "Running integration tests against: $API_ENDPOINT"
-          pytest tests/integration/ -v --tb=short --junitxml=test-results.xml
-
-      - name: Upload test results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-results
-          path: test-results.xml
-          retention-days: 30

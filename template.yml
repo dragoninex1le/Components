@@ -1,63 +1,384 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Porth common components — pipeline validation
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Porth common components — User Management & Multi-Tenancy infrastructure.
+  Includes DynamoDB tables, EventBridge bus, and API endpoints.
 
+# ---------------------------------------------------------------------------
+# Parameters
+# ---------------------------------------------------------------------------
 Parameters:
-  LambdaRoleArn:
+  Environment:
     Type: String
-    Description: ARN of the IAM role for the Lambda function
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Deployment environment
 
+# ---------------------------------------------------------------------------
+# Globals
+# ---------------------------------------------------------------------------
+Globals:
+  Function:
+    Runtime: python3.13
+    Timeout: 30
+    MemorySize: 256
+    Environment:
+      Variables:
+        PORTH_USERS_TABLE: !Ref PorthUsersTable
+        PORTH_PERMISSIONS_TABLE: !Ref PorthPermissionsTable
+        PORTH_ROLES_TABLE: !Ref PorthRolesTable
+        PORTH_CLAIM_ROLE_MAPPINGS_TABLE: !Ref PorthClaimRoleMappingsTable
+        PORTH_CLAIM_MAPPING_CONFIGS_TABLE: !Ref PorthClaimMappingConfigsTable
+        PORTH_EVENT_BUS: !Ref PorthEventBus
+        AWS_REGION_NAME: !Ref AWS::Region
+
+# ---------------------------------------------------------------------------
+# Resources
+# ---------------------------------------------------------------------------
 Resources:
-  HealthCheckFunction:
-    Type: AWS::Lambda::Function
-    Properties:
-      Runtime: python3.12
-      Handler: handler.handler
-      Code: lambdas/health_check/
-      Role: !Ref LambdaRoleArn
-      Timeout: 10
-      MemorySize: 128
 
+  # =========================================================================
+  # API Gateway
+  # =========================================================================
   PorthApi:
-    Type: AWS::ApiGatewayV2::Api
+    Type: AWS::Serverless::HttpApi
     Properties:
-      Name: !Sub "${AWS::StackName}-api"
-      ProtocolType: HTTP
+      StageName: $default
       CorsConfiguration:
         AllowOrigins:
           - '*'
         AllowMethods:
           - GET
+          - POST
+          - PUT
+          - PATCH
+          - DELETE
+          - OPTIONS
+        AllowHeaders:
+          - Content-Type
+          - Authorization
+          - X-Amz-Date
+          - X-Api-Key
+          - X-Amz-Security-Token
 
-  ApiIntegration:
-    Type: AWS::ApiGatewayV2::Integration
+  # =========================================================================
+  # Lambda Functions
+  # =========================================================================
+  HealthCheckFunction:
+    Type: AWS::Serverless::Function
     Properties:
-      ApiId: !Ref PorthApi
-      IntegrationType: AWS_PROXY
-      IntegrationUri: !GetAtt HealthCheckFunction.Arn
-      PayloadFormatVersion: '2.0'
+      FunctionName: !Sub porth-health-check-${Environment}
+      Handler: handler.handler
+      CodeUri: lambdas/health_check/
+      Timeout: 10
+      MemorySize: 128
+      Events:
+        HealthGet:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PorthApi
+            Path: /health
+            Method: GET
 
-  HealthRoute:
-    Type: AWS::ApiGatewayV2::Route
+  # =========================================================================
+  # EventBridge
+  # =========================================================================
+  PorthEventBus:
+    Type: AWS::Events::EventBus
     Properties:
-      ApiId: !Ref PorthApi
-      RouteKey: GET /health
-      Target: !Sub integrations/${ApiIntegration}
+      Name: !Sub porth-events-${Environment}
 
-  DefaultStage:
-    Type: AWS::ApiGatewayV2::Stage
+  # =========================================================================
+  # DynamoDB Tables
+  # =========================================================================
+
+  # -------------------------------------------------------------------------
+  # porth-users: Single-table design for Organization, Tenant, User entities
+  #   and DynamoDB atomic counter items (COUNTER#ORG, COUNTER#TENANT).
+  #
+  # Main table key: PK (S), SK (S)  — uppercase
+  # GSI1: gsi1pk / gsi1sk — org-slug lookup, tenant listing, user external_id
+  # GSI2: gsi2pk / gsi2sk — user email lookup by tenant
+  # GSI3: gsi3pk / gsi3sk — list users by org+tenant
+  # -------------------------------------------------------------------------
+  PorthUsersTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
-      ApiId: !Ref PorthApi
-      StageName: $default
-      AutoDeploy: true
+      TableName: !Sub porth-users-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: gsi1pk
+          AttributeType: S
+        - AttributeName: gsi1sk
+          AttributeType: S
+        - AttributeName: gsi2pk
+          AttributeType: S
+        - AttributeName: gsi2sk
+          AttributeType: S
+        - AttributeName: gsi3pk
+          AttributeType: S
+        - AttributeName: gsi3sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: gsi1
+          KeySchema:
+            - AttributeName: gsi1pk
+              KeyType: HASH
+            - AttributeName: gsi1sk
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: gsi2
+          KeySchema:
+            - AttributeName: gsi2pk
+              KeyType: HASH
+            - AttributeName: gsi2sk
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: gsi3
+          KeySchema:
+            - AttributeName: gsi3pk
+              KeyType: HASH
+            - AttributeName: gsi3sk
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: Project
+          Value: Porth
+        - Key: Component
+          Value: UserManagement
+        - Key: Environment
+          Value: !Ref Environment
 
-  LambdaInvokePermission:
-    Type: AWS::Lambda::Permission
+  # -------------------------------------------------------------------------
+  # porth-permissions: Permission registration and listing.
+  #   Stores namespaced permissions scoped to tenant.
+  #
+  # Main table key: pk (S), sk (S)  — lowercase
+  # GSI1: gsi1pk / gsi1sk — browse by tenant and category
+  #
+  # Access patterns:
+  #   pk=TENANT#{id}#NS#{namespace}, sk=PERM#{key}  → single permission
+  #   pk=TENANT#{id}#NS#{namespace}                  → all in namespace
+  #   gsi1pk=TENANT#{id}                              → all in tenant
+  #   gsi1pk=TENANT#{id}, gsi1sk begins CAT#          → by category
+  # -------------------------------------------------------------------------
+  PorthPermissionsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
-      FunctionName: !Ref HealthCheckFunction
-      Action: lambda:InvokeFunction
-      Principal: apigateway.amazonaws.com
-      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${PorthApi}/*
+      TableName: !Sub porth-permissions-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+        - AttributeName: gsi1pk
+          AttributeType: S
+        - AttributeName: gsi1sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: gsi1
+          KeySchema:
+            - AttributeName: gsi1pk
+              KeyType: HASH
+            - AttributeName: gsi1sk
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: Project
+          Value: Porth
+        - Key: Component
+          Value: Permissions
+        - Key: Environment
+          Value: !Ref Environment
 
+  # -------------------------------------------------------------------------
+  # porth-roles: Stores Role, RolePermission, and UserRole entities.
+  #   Single-table design with three item types sharing the same table.
+  #
+  # Main table key: pk (S), sk (S)  — lowercase
+  # GSI1: gsi1pk / gsi1sk — list user-role assignments by tenant
+  #
+  # Item types and access patterns:
+  #   Role:           pk=TENANT#{id}, sk=ROLE#{id}
+  #   RolePermission: pk=ROLE#{id}, sk=PERM#{key}
+  #   UserRole:       pk=USER#{id}#TENANT#{id}, sk=ROLE#{id}
+  #                   gsi1pk=TENANT#{id}, gsi1sk=USERROLE#{user_id}
+  # -------------------------------------------------------------------------
+  PorthRolesTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub porth-roles-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+        - AttributeName: gsi1pk
+          AttributeType: S
+        - AttributeName: gsi1sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: gsi1
+          KeySchema:
+            - AttributeName: gsi1pk
+              KeyType: HASH
+            - AttributeName: gsi1sk
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: Project
+          Value: Porth
+        - Key: Component
+          Value: Roles
+        - Key: Environment
+          Value: !Ref Environment
+
+  # -------------------------------------------------------------------------
+  # porth-claim-role-mappings: Maps IdP JWT claims to internal roles.
+  #   Per-tenant, per-namespace claim-to-role mapping rules with priority.
+  #
+  # Main table key: pk (S), sk (S)  — lowercase
+  # GSI1: gsi1pk / gsi1sk — list all mappings by tenant
+  #
+  # Access patterns:
+  #   pk=TENANT#{id}#NS#{namespace}, sk=MAPPING#{id}  → single mapping
+  #   pk=TENANT#{id}#NS#{namespace}                    → all in namespace
+  #   gsi1pk=TENANT#{id}                                → all in tenant
+  # -------------------------------------------------------------------------
+  PorthClaimRoleMappingsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub porth-claim-role-mappings-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+        - AttributeName: gsi1pk
+          AttributeType: S
+        - AttributeName: gsi1sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: gsi1
+          KeySchema:
+            - AttributeName: gsi1pk
+              KeyType: HASH
+            - AttributeName: gsi1sk
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: Project
+          Value: Porth
+        - Key: Component
+          Value: ClaimRoleMappings
+        - Key: Environment
+          Value: !Ref Environment
+
+  # -------------------------------------------------------------------------
+  # porth-claim-mapping-configs: Versioned claim field transformation configs.
+  #   Stores both human-readable mapping_source and compiled_ops (execution-
+  #   ready operations) with version history for rollback.
+  #
+  # Main table key: PK (S), SK (S)  — uppercase
+  # GSI1: gsi1pk / gsi1sk — list versions across namespaces by tenant
+  #
+  # Access patterns:
+  #   PK=TENANT#{id}#NS#{namespace}, SK=VERSION#{ver}  → specific version
+  #   PK=TENANT#{id}#NS#{namespace}                     → all versions
+  #   gsi1pk=TENANT#{id}                                 → all in tenant
+  # -------------------------------------------------------------------------
+  PorthClaimMappingConfigsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub porth-claim-mapping-configs-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: gsi1pk
+          AttributeType: S
+        - AttributeName: gsi1sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: gsi1
+          KeySchema:
+            - AttributeName: gsi1pk
+              KeyType: HASH
+            - AttributeName: gsi1sk
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: Project
+          Value: Porth
+        - Key: Component
+          Value: ClaimMappingConfigs
+        - Key: Environment
+          Value: !Ref Environment
+
+# ---------------------------------------------------------------------------
+# Outputs
+# ---------------------------------------------------------------------------
 Outputs:
   ApiEndpoint:
     Description: API Gateway endpoint URL
@@ -65,6 +386,46 @@ Outputs:
   HealthCheckUrl:
     Description: Full health check URL
     Value: !Sub "https://${PorthApi}.execute-api.${AWS::Region}.amazonaws.com/health"
-  FunctionArn:
-    Description: Lambda function ARN
+  HealthCheckFunctionArn:
+    Description: Health check Lambda function ARN
     Value: !GetAtt HealthCheckFunction.Arn
+
+  # EventBridge
+  EventBusName:
+    Description: EventBridge bus name for porth domain events
+    Value: !Ref PorthEventBus
+  EventBusArn:
+    Description: EventBridge bus ARN
+    Value: !GetAtt PorthEventBus.Arn
+
+  # DynamoDB Tables
+  UsersTableName:
+    Description: DynamoDB table for organizations, tenants, and users
+    Value: !Ref PorthUsersTable
+  UsersTableArn:
+    Description: Users table ARN (for IAM policies)
+    Value: !GetAtt PorthUsersTable.Arn
+  PermissionsTableName:
+    Description: DynamoDB table for permissions
+    Value: !Ref PorthPermissionsTable
+  PermissionsTableArn:
+    Description: Permissions table ARN (for IAM policies)
+    Value: !GetAtt PorthPermissionsTable.Arn
+  RolesTableName:
+    Description: DynamoDB table for roles, role-permissions, and user-roles
+    Value: !Ref PorthRolesTable
+  RolesTableArn:
+    Description: Roles table ARN (for IAM policies)
+    Value: !GetAtt PorthRolesTable.Arn
+  ClaimRoleMappingsTableName:
+    Description: DynamoDB table for claim-to-role mappings
+    Value: !Ref PorthClaimRoleMappingsTable
+  ClaimRoleMappingsTableArn:
+    Description: Claim role mappings table ARN (for IAM policies)
+    Value: !GetAtt PorthClaimRoleMappingsTable.Arn
+  ClaimMappingConfigsTableName:
+    Description: DynamoDB table for claim mapping configurations
+    Value: !Ref PorthClaimMappingConfigsTable
+  ClaimMappingConfigsTableArn:
+    Description: Claim mapping configs table ARN (for IAM policies)
+    Value: !GetAtt PorthClaimMappingConfigsTable.Arn
