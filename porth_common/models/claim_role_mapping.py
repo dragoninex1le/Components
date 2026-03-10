@@ -1,4 +1,10 @@
-"""ClaimRoleMapping model for JWT claim to role mapping."""
+"""ClaimRoleMapping entity model for JWT claim-based role assignment.
+
+ClaimRoleMapping entities define rules for automatically assigning internal roles
+based on JWT claim values. They enable organizations to map IdP groups (e.g., LDAP groups,
+Okta groups) directly to Porth roles without manual user provisioning, supporting
+enterprise SSO flows where group membership drives authorization.
+"""
 
 from __future__ import annotations
 
@@ -8,8 +14,25 @@ from pydantic import BaseModel, ConfigDict, Field
 class ClaimRoleMapping(BaseModel):
     """Represents a mapping from a JWT claim value to an internal role.
 
-    This model defines how JWT claims (e.g., groups, roles, department) are
-    evaluated to determine which internal roles a user should be assigned.
+    Why ClaimRoleMapping exists:
+    - Enable automatic role assignment based on JWT claim values (groups, departments, etc.)
+    - Support enterprise SSO flows where IdP groups map to application roles
+    - Reduce manual provisioning by deriving roles from identity provider data
+    - Allow flexible, priority-based matching (first match wins, or aggregate all matches)
+
+    Key relationships:
+    - Many-to-one with Tenant (mappings are tenant-scoped)
+    - Many-to-one with application namespace (app_namespace)
+    - Points to internal Role by role_id
+
+    Business rules:
+    - A mapping defines: if JWT has claim_key with claim_value, assign role_id
+    - For list claims (e.g., "groups": ["admin", "users"]), check if claim_value is in list
+    - For scalar claims, check if claim_value equals the claim value
+    - priority controls evaluation order (higher priority checked first)
+    - is_active allows disabling mappings without deletion
+    - Multiple mappings can match for a single user (aggregate all matching roles)
+    - Used during JIT (just-in-time) provisioning to auto-assign roles on login
     """
 
     id: str = Field(description="Unique identifier (UUID)")

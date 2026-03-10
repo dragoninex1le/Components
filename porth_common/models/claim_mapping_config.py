@@ -1,4 +1,10 @@
-"""ClaimMappingConfig model for compiled JWT claim transformation pipelines."""
+"""ClaimMappingConfig entity model for JWT claim transformation pipelines.
+
+ClaimMappingConfig stores compiled configurations for transforming JWT claims into
+user profile data. It bridges human-readable YAML configurations with compiled operations
+that execute efficiently at scale. Versioning enables audit trails and quick rollback
+if a configuration breaks user provisioning.
+"""
 
 from __future__ import annotations
 
@@ -10,9 +16,35 @@ from pydantic import BaseModel, Field
 class ClaimMappingConfig(BaseModel):
     """Represents a compiled claim mapping configuration for JWT transformation.
 
-    This model stores both the human-readable mapping configuration and the compiled
-    operations that can be executed against JWT claims. It supports versioning to
-    enable rollback and audit trails.
+    Why ClaimMappingConfig exists:
+    - Define how to transform JWT claims into user profile fields (email, display_name, etc.)
+    - Support complex claim transformations (concatenation, regex extraction, templating)
+    - Enable compilation of human-readable configs into optimized operations
+    - Maintain audit trail and enable rollback via versioning
+    - Validate configurations against example JWTs before deployment
+
+    Key relationships:
+    - Many-to-one with Tenant (configs are tenant-scoped)
+    - Many-to-one with application namespace (app_namespace)
+    - One version per {tenant, namespace, version_number}
+
+    Business rules:
+    - mapping_source is human-readable YAML/JSON defining operations
+    - compiled_ops are typed operation dicts ready for executor
+    - compiled_hash enables integrity checking and change detection
+    - version auto-increments (1, 2, 3, ...) on each save
+    - Each save is immutable; updates create new versions
+    - get_latest() returns the active version
+    - rollback() creates new version from historical version without deleting current
+    - example_jwt optional validation data used at compile time
+    - validation_report captures any warnings/errors from example JWT test
+
+    Typical workflow:
+    1. Define mapping_source (human-readable operations)
+    2. Compile it (creates compiled_ops, compiled_hash, optionally validates against example)
+    3. Save as new version
+    4. If issues, rollback() to previous version (creates new version from old)
+    5. Executor uses latest compiled_ops to transform real JWTs at login time
     """
 
     id: str = Field(description="Unique configuration identifier (UUID)")
