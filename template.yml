@@ -81,6 +81,286 @@ Resources:
             Method: GET
 
   # =========================================================================
+  # Porth API Lambda Function
+  # =========================================================================
+  PorthApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub porth-api-${Environment}
+      Handler: app.handler
+      CodeUri: lambdas/api/
+      Timeout: 30
+      MemorySize: 512
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PorthUsersTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PorthPermissionsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PorthRolesTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PorthClaimRoleMappingsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PorthClaimMappingConfigsTable
+        - EventBridgePutEventsPolicy:
+            EventBusName: !Ref PorthEventBus
+      Events:
+        # Root endpoint
+        ApiRoot:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PorthApi
+            Path: /
+            Method: GET
+        # Organizations endpoints
+        OrganizationsCreate:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PorthApi
+            Path: /organizations
+            Method: POST
+        OrganizationsList:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PorthApi
+            Path: /organizations
+            Method: GET
+        OrganizationsGet:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PorthApi
+            Path: /organizations/{org_id}
+            Method: GET
+        OrganizationsGetBySlug:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PorthApi
+            Path: /organizations/slug/{slug}
+            Method: GET
+        OrganizationsUpdate:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PorthApi
+            Path: /organizations/{org_id}
+            Method: PATCH
+        # Tenants endpoints
+        TenantsCreate:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PorthApi
+            Path: /tenants
+            Method: POST
+        TenantsGet:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PorthApi
+            Path: /tenants/{tenant_id}
+            Method: GET
+        TenantsList:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PorthApi
+            Path: /tenants/organization/{org_id}
+            Method: GET
+        TenantsUpdate:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PorthApi
+            Path: /tenants/{tenant_id}
+            Method: PATCH
+        # Users endpoints
+        UsersUpsert:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PorthApi
+            Path: /users/upsert
+            Method: POST
+        UsersGet:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PorthApi
+            Path: /users/{user_id}
+            Method: GET
+        UsersGetByEmail:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PorthApi
+            Path: /users/email/{email}/tenant/{tenant_id}
+            Method: GET
+        UsersList:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PorthApi
+            Path: /users/organization/{org_id}/tenant/{tenant_id}
+            Method: GET
+        UsersUpdate:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PorthApi
+            Path: /users/{user_id}
+            Method: PATCH
+        UsersSuspend:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PorthApi
+            Path: /users/{user_id}/suspend
+            Method: POST
+        UsersReactivate:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PorthApi
+            Path: /users/{user_id}/reactivate
+            Method: POST
+        # Permissions endpoints
+        PermissionsRegister:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PorthApi
+            Path: /permissions
+            Method: POST
+        PermissionsList:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PorthApi
+            Path: /permissions
+            Method: GET
+        PermissionsGet:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PorthApi
+            Path: /permissions/{tenant_id}/{app_namespace}/{key}
+            Method: GET
+        # Roles endpoints
+        RolesCreate:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PorthApi
+            Path: /roles
+            Method: POST
+        RolesList:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PorthApi
+            Path: /roles/tenant/{tenant_id}
+            Method: GET
+        RolesGet:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PorthApi
+            Path: /roles/{tenant_id}/{role_id}
+            Method: GET
+        RolesUpdate:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PorthApi
+            Path: /roles/{tenant_id}/{role_id}
+            Method: PATCH
+        RolesDelete:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PorthApi
+            Path: /roles/{tenant_id}/{role_id}
+            Method: DELETE
+        RolesSetPermissions:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PorthApi
+            Path: /roles/{role_id}/permissions
+            Method: PUT
+        RolesGetPermissions:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PorthApi
+            Path: /roles/{role_id}/permissions
+            Method: GET
+        RolesAssignToUser:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PorthApi
+            Path: /roles/users/{user_id}/tenant/{tenant_id}/roles/{role_id}
+            Method: POST
+        RolesRemoveFromUser:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PorthApi
+            Path: /roles/users/{user_id}/tenant/{tenant_id}/roles/{role_id}
+            Method: DELETE
+        RolesGetUserRoles:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PorthApi
+            Path: /roles/users/{user_id}/tenant/{tenant_id}/roles
+            Method: GET
+        # Claim role mappings endpoints
+        ClaimRoleMappingsCreate:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PorthApi
+            Path: /claim-role-mappings
+            Method: POST
+        ClaimRoleMappingsGet:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PorthApi
+            Path: /claim-role-mappings/{tenant_id}/{app_namespace}/{mapping_id}
+            Method: GET
+        ClaimRoleMappingsList:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PorthApi
+            Path: /claim-role-mappings/tenant/{tenant_id}
+            Method: GET
+        ClaimRoleMappingsListByNamespace:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PorthApi
+            Path: /claim-role-mappings/tenant/{tenant_id}/namespace/{app_namespace}
+            Method: GET
+        ClaimRoleMappingsUpdate:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PorthApi
+            Path: /claim-role-mappings/{tenant_id}/{app_namespace}/{mapping_id}
+            Method: PATCH
+        ClaimRoleMappingsDelete:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PorthApi
+            Path: /claim-role-mappings/{tenant_id}/{app_namespace}/{mapping_id}
+            Method: DELETE
+        # Claim mapping configs endpoints
+        ClaimMappingConfigsCreate:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PorthApi
+            Path: /claim-mapping-configs
+            Method: POST
+        ClaimMappingConfigsGetLatest:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PorthApi
+            Path: /claim-mapping-configs/{tenant_id}/{app_namespace}/latest
+            Method: GET
+        ClaimMappingConfigsListVersions:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PorthApi
+            Path: /claim-mapping-configs/{tenant_id}/{app_namespace}/versions
+            Method: GET
+        ClaimMappingConfigsGetVersion:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PorthApi
+            Path: /claim-mapping-configs/{tenant_id}/{app_namespace}/{version}
+            Method: GET
+        ClaimMappingConfigsRollback:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PorthApi
+            Path: /claim-mapping-configs/{tenant_id}/{app_namespace}/rollback/{version}
+            Method: POST
+
+  # =========================================================================
   # EventBridge
   # =========================================================================
   PorthEventBus:
@@ -389,6 +669,15 @@ Outputs:
   HealthCheckFunctionArn:
     Description: Health check Lambda function ARN
     Value: !GetAtt HealthCheckFunction.Arn
+  PorthApiFunctionArn:
+    Description: Porth API Lambda function ARN
+    Value: !GetAtt PorthApiFunction.Arn
+  PorthApiUrl:
+    Description: Porth API base URL
+    Value: !Sub "https://${PorthApi}.execute-api.${AWS::Region}.amazonaws.com"
+  PorthApiDocsUrl:
+    Description: Porth API OpenAPI documentation (Swagger UI)
+    Value: !Sub "https://${PorthApi}.execute-api.${AWS::Region}.amazonaws.com/docs"
 
   # EventBridge
   EventBusName:
