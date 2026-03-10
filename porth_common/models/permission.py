@@ -1,4 +1,10 @@
-"""Permission model for Porth user management system."""
+"""Permission entity model for Porth's fine-grained access control system.
+
+Permissions represent atomic capabilities in the system. They are registered by applications
+at startup (idempotent registration) and become assignable to roles. The permission model
+supports multi-tenancy and application namespacing, allowing different applications to
+define their own permission models within shared tenants.
+"""
 
 from __future__ import annotations
 
@@ -8,13 +14,28 @@ from pydantic import BaseModel, ConfigDict, Field
 class Permission(BaseModel):
     """Represents a permission entity with category metadata for UI grouping.
 
-    A permission is an atomic capability within an application namespace.
-    The category field is metadata for UI organization—it's not a hierarchical
-    classification but rather a context label for grouping related permissions.
+    Why Permissions exist:
+    - Represent atomic, specific capabilities in the system
+    - Enable fine-grained access control when combined with roles
+    - Support multi-application deployments with isolated permission models
+    - Enable UI grouping via categories (Orders, Products, Settings, etc.)
+
+    Key relationships:
+    - Many-to-many with Role (through RolePermission)
+    - Scoped to both Tenant and application namespace (app_namespace)
+
+    Business rules:
+    - Permission key must be unique within a tenant/namespace (e.g., 'orders.read')
+    - Permissions are application-scoped (different apps have different permission sets)
+    - Permissions are registered by applications (typically at startup)
+    - Registration is idempotent: re-registering updates mutable fields only
+    - Category is UI metadata, not a hierarchy (for grouping in permission selection UIs)
+    - Multiple applications can exist in a single tenant with independent permissions
+    - sort_order controls display order within a category in the UI
     """
 
     id: str = Field(description="Unique identifier (UUID)")
-    key: str = Field(description="Unique key like 'orders.read' or 'products.write'")
+    key: str = Field(description="Unique key within tenant/namespace like 'orders.read' or 'products.write'")
     display_name: str = Field(description="Human-readable name for UI display")
     description: str | None = Field(
         default=None, description="Optional detailed description"
