@@ -1,4 +1,12 @@
-"""Claim mapping compiler for converting human-readable configs to typed operations."""
+"""Claim mapping compiler for converting human-readable configs to typed operations.
+
+The compiler translates human-friendly YAML/JSON claim mapping specifications into
+optimized typed operations suitable for high-performance execution during user login.
+Supports validation against example JWTs to catch configuration errors before deployment.
+
+This service is used during configuration save/update to validate and prepare the
+configuration for fast execution at login time (see claim_mapping_executor).
+"""
 
 from __future__ import annotations
 
@@ -12,7 +20,11 @@ from porth_common.services.exceptions import CompilationError
 
 @dataclass
 class CompilationResult:
-    """Result of compilation operation."""
+    """Result of compilation operation.
+
+    Contains the compiled operations ready for execution, a hash for integrity
+    checking, and an optional validation report from testing against example JWTs.
+    """
 
     compiled_ops: list[dict[str, Any]]
     compiled_hash: str
@@ -21,6 +33,19 @@ class CompilationResult:
 
 class ClaimMappingCompiler:
     """Compiles human-readable JWT claim mapping configs into typed operations.
+
+    Performance note: Compilation happens at configuration save time, not at login time.
+    The result (compiled_ops) is optimized for fast execution by executor.
+
+    Supported operation types provide flexible claim transformation:
+    - direct: Map a single JWT claim path to a user field
+    - concat: Concatenate multiple JWT claims with separator
+    - regex_extract: Extract via regex from a claim value
+    - coalesce: Take first non-null from multiple sources
+    - split: Split a claim by delimiter and take an index
+    - template: String template with {placeholder} substitution
+    - lowercase: Lowercase a claim value
+    - uppercase: Uppercase a claim value
 
     Supported operation types:
     - direct: Map a single JWT claim path to a user field
@@ -50,6 +75,10 @@ class ClaimMappingCompiler:
     ) -> CompilationResult:
         """Compile a mapping configuration into typed operations.
 
+        Validates the mapping configuration and converts it to a list of compiled
+        operations that can be executed efficiently. Optionally tests the configuration
+        against an example JWT to catch errors before deployment.
+
         Args:
             mapping_source: Dict with 'operations' key containing list of operation configs
             example_jwt: Optional example JWT for validation against compiled ops
@@ -58,7 +87,7 @@ class ClaimMappingCompiler:
             CompilationResult with compiled_ops, compiled_hash, and optional validation_report
 
         Raises:
-            CompilationError: If configuration is invalid
+            CompilationError: If configuration is invalid or example JWT test fails
         """
         if not isinstance(mapping_source, dict):
             raise CompilationError("mapping_source must be a dictionary")
