@@ -1,4 +1,15 @@
-"""Claim mapping executor for running compiled operations against JWT claims."""
+"""Claim mapping executor for running compiled operations against JWT claims.
+
+Executes pre-compiled claim transformation operations at high speed during user login.
+Designed for sub-5ms performance on typical JWT payloads with graceful error handling.
+
+This service works in tandem with claim_mapping_compiler:
+- Compiler: transforms human-readable config to typed operations (config save time)
+- Executor: runs operations against JWT claims at login time (hot path)
+
+The executor is designed for resilience: if any operation fails, that field is skipped
+and execution continues with remaining operations.
+"""
 
 from __future__ import annotations
 
@@ -9,16 +20,28 @@ from typing import Any
 class ClaimMappingExecutor:
     """Executes compiled claim mapping operations against JWT claims.
 
-    Target performance: < 5ms for typical payloads.
-    On any operation error, the field is skipped and execution continues (graceful degradation).
+    Performance characteristics:
+    - Target: < 5ms for typical JWT payloads (< 2KB)
+    - Optimized for hot path during user login
+    - Graceful degradation: errors in one operation don't block others
+
+    Execution model:
+    - Runs each compiled operation sequentially
+    - Each operation extracts/transforms one or more JWT claims
+    - Results written to output dictionary
+    - If an operation fails, that field is skipped (graceful failure)
+    - Nested claim access via dot notation (e.g., "address.country")
     """
 
     def execute(self, compiled_ops: list[dict[str, Any]], jwt_claims: dict) -> dict[str, Any]:
         """Execute compiled operations against JWT claims.
 
+        Transforms JWT claims into user profile fields according to compiled operations.
+        Designed to be fast (< 5ms) and resilient to individual operation failures.
+
         Args:
-            compiled_ops: List of compiled operation dicts
-            jwt_claims: Raw JWT claims dictionary
+            compiled_ops: List of compiled operation dicts (from ClaimMappingCompiler)
+            jwt_claims: Raw JWT claims dictionary from identity provider
 
         Returns:
             Dictionary of {target_field: extracted_value}
@@ -26,6 +49,7 @@ class ClaimMappingExecutor:
 
         Note:
             On any operation error, that field is skipped and execution continues.
+            This ensures one broken operation doesn't block user login.
         """
         result: dict[str, Any] = {}
 

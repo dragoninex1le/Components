@@ -1,4 +1,12 @@
-"""JWT claim-to-role evaluation engine for Porth."""
+"""JWT claim-to-role evaluation engine for Porth.
+
+Evaluates JWT claims against claim-to-role mappings to automatically assign roles
+to users during authentication. Used during JIT (just-in-time) provisioning to
+determine which roles a user should have based on their identity provider attributes.
+
+Supports both list and scalar claim matching, priority-based evaluation, and fallback
+to default roles when no mappings match.
+"""
 
 from __future__ import annotations
 
@@ -9,12 +17,21 @@ from porth_common.services.exceptions import AccessDeniedError
 class ClaimRoleEvaluator:
     """Evaluates JWT claims against claim-to-role mappings to determine assigned roles.
 
-    The evaluator:
-    1. Sorts mappings by priority (descending — higher priority first)
-    2. Checks each mapping to see if the JWT claim matches
-    3. Collects all matched role IDs and deduplicates them
-    4. Falls back to default roles if no matches are found
-    5. Raises AccessDeniedError if no roles are matched and no defaults provided
+    Used during user login to automatically assign internal roles based on JWT claims
+    (typically from identity provider groups, departments, or custom attributes).
+
+    Evaluation algorithm:
+    1. Filter to active mappings only
+    2. Sort by priority descending (higher priority evaluated first)
+    3. For each mapping, check if JWT claim matches
+    4. Collect all matched role IDs (may have multiple matches)
+    5. Return deduplicated, sorted role IDs
+    6. If no matches and default_role_ids provided, return defaults
+    7. If no matches and no defaults, raise AccessDeniedError (deny login)
+
+    Claim matching:
+    - For list claims (e.g., "groups": ["admin", "users"]): check if mapping value in list
+    - For scalar claims: check if mapping value equals claim value
     """
 
     @staticmethod
